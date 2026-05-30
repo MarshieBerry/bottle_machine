@@ -1,0 +1,6 @@
+requests>=2.31,<3
+pyserial>=3.5,<4
+mfrc522-python>=0.0.7
+ultralytics==8.3.70
+torch==2.5.0
+torchvision==0.20
