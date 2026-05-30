@@ -2,9 +2,6 @@
 
 # Smart Bottle Machine Build Version
 
-This version uses real hardware inputs and UART between the Raspberry Pi and
-ESP32.
-
 ```text
 Pi RC522 reads RFID
 -> Pi checks/creates user in Supabase
