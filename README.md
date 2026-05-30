@@ -24,7 +24,7 @@ For now the only accepted YOLO label is `bottle`.
 
 - `pi/main.py`: Pi controller for RFID, YOLO, Supabase, and UART protocol.
 - `pi/test.py`: UART command tester for ESP32 hardware.
-- `pi/config.example.py`: copy to `config.py` and edit private settings.
+- `config.py` and edit private settings.
 - `esp32/smart_bin_esp32/smart_bin_esp32.ino`: ESP32 UART hardware controller.
 - `supabase/setup.sql`: Supabase tables and session-saving function.
 
