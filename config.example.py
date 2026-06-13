@@ -1,7 +1,7 @@
 """Copy this file to config.py on the Raspberry Pi and edit the values."""
 
-# Raspberry Pi UART connected to ESP32 Serial2.
-ESP32_ENABLED = False
+# ESP32 UART. Set ESP32_ENABLED = False to test without ESP32 connected.
+ESP32_ENABLED = True
 UART_PORT = "/dev/serial0"
 UART_BAUD = 115200
 UART_READ_TIMEOUT_SEC = 0.2
@@ -9,16 +9,13 @@ UART_EVENT_TIMEOUT_SEC = 1.0
 UART_COMMAND_TIMEOUT_SEC = 5.0
 UART_ACTION_TIMEOUT_SEC = 20.0
 
-# Set True while testing hardware before Supabase is configured.
-# In offline test mode, user lookup and final session upload are skipped.
+# Supabase.
 OFFLINE_TEST_MODE = False
-
-# Required when OFFLINE_TEST_MODE is False. Keep this file private.
 SUPABASE_URL = "https://YOUR_PROJECT_REF.supabase.co"
 SUPABASE_API_KEY = "YOUR_SUPABASE_SECRET"
 KIOSK_ID = "pi-bottle-machine-01"
 
-# YOLO. Change this later to your trained .pt model file.
+# YOLO.
 YOLO_MODEL_PATH = "yolov8n.pt"
 YOLO_IMAGE_SIZE = 640
 YOLO_CONFIDENCE = 0.60
@@ -32,11 +29,9 @@ DISPLAY_WIDTH = 800
 DISPLAY_HEIGHT = 480
 DISPLAY_FPS = 20
 
-# "usb_event" reads the USB scanner directly even while pygame owns the screen.
-# "usb_keyboard" reads from terminal input.
-# "rc522" for an SPI RC522 module connected to the Pi GPIO header.
-RFID_MODE = "usb_event"
-RFID_INPUT_DEVICE = "/dev/input/event7"
+# RFID.
+RFID_MODE = "usb_event"  # "usb_event", "usb_keyboard", or "rc522"
+RFID_INPUT_DEVICE = ""  # Example: "/dev/input/by-id/usb-...-event-kbd"
 RFID_DEBOUNCE_SEC = 1.0
 
 # Scoring.

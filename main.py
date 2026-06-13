@@ -1,7 +1,8 @@
- from __future__ import annotations
+from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sys
 import time
 import uuid
@@ -42,9 +43,8 @@ class Session:
     total_weight_kg: float = 0.0
     total_points: int = 0
 
-    def add_bottle(self, weight_kg: float, points: int) -> None:
+    def add_bottle(self, points: int) -> None:
         self.accepted_bottles += 1
-        self.total_weight_kg = round(self.total_weight_kg + weight_kg, 3)
         self.total_points += points
 
 
@@ -219,6 +219,9 @@ class Esp32Uart:
 
 
 class MockEsp32:
+    def __init__(self, display=None) -> None:
+        self.display = display
+
     def close(self) -> None:
         return
 
@@ -228,16 +231,26 @@ class MockEsp32:
 
     def command(self, command: str, timeout_sec: float | None = None) -> dict[str, Any]:
         log("MOCK-ESP32", f"Command: {command}")
-        if command == "weight":
-            while True:
-                value = input("Simulated weight - type bottle weight in kg: ").strip()
-                try:
-                    return {"cmd": "weight", "ok": True, "weight_kg": round(float(value), 3)}
-                except ValueError:
-                    log("WEIGHT", "Invalid number. Example: 0.250")
         return {"cmd": command, "ok": True, "state": "mock"}
 
     def wait_for_event(self) -> dict[str, Any] | None:
+        if hasattr(self.display, "get_action") and getattr(self.display, "is_real_display", lambda: False)():
+            log("MOCK-ESP32", "Waiting for display input: Enter=item, E=end.")
+            while True:
+                if hasattr(self.display, "supports_actions") and not self.display.supports_actions():
+                    break
+                if hasattr(self.display, "wait_for_action"):
+                    action = self.display.wait_for_action(timeout_sec=0.25)
+                else:
+                    action = self.display.get_action()
+                if action == "item":
+                    log("MOCK-ESP32", "Display Enter simulated item detection.")
+                    return {"event": "item_detected"}
+                if action == "end":
+                    log("MOCK-ESP32", "Display E simulated END button.")
+                    return {"event": "end_pressed"}
+                time.sleep(0.05)
+
         choice = input("\nPress Enter to simulate item detection, or type end to finish: ").strip().lower()
         if choice == "end":
             return {"event": "end_pressed"}
@@ -269,8 +282,15 @@ class CardReader:
         self._evdev = ecodes
         configured = getattr(config, "RFID_INPUT_DEVICE", "").strip()
         if configured:
+            if configured.startswith("event"):
+                configured = f"/dev/input/{configured}"
+            if not os.path.exists(configured):
+                raise RuntimeError(f"RFID_INPUT_DEVICE does not exist: {configured}")
             device = InputDevice(configured)
             log("RFID", f"Using USB input device: {configured} ({device.name})")
+            capabilities = device.capabilities()
+            key_codes = capabilities.get(ecodes.EV_KEY, [])
+            log("RFID", f"Device key capability count: {len(key_codes)}")
             return device
 
         candidates = []
@@ -291,7 +311,7 @@ class CardReader:
         log("RFID", "Set RFID_INPUT_DEVICE in config.py to one of these candidates:")
         for device in candidates:
             log("RFID", f"  {device.path}  {device.name}")
-        raise RuntimeError("Could not auto-select USB RFID input device")
+        raise RuntimeError("Could not auto-select USB RFID input device. Run: python find_rfid.py")
 
     def _key_to_char(self, code: int) -> str | None:
         assert self._evdev is not None
@@ -306,6 +326,32 @@ class CardReader:
             self._evdev.KEY_7: "7",
             self._evdev.KEY_8: "8",
             self._evdev.KEY_9: "9",
+            self._evdev.KEY_A: "A",
+            self._evdev.KEY_B: "B",
+            self._evdev.KEY_C: "C",
+            self._evdev.KEY_D: "D",
+            self._evdev.KEY_E: "E",
+            self._evdev.KEY_F: "F",
+            self._evdev.KEY_G: "G",
+            self._evdev.KEY_H: "H",
+            self._evdev.KEY_I: "I",
+            self._evdev.KEY_J: "J",
+            self._evdev.KEY_K: "K",
+            self._evdev.KEY_L: "L",
+            self._evdev.KEY_M: "M",
+            self._evdev.KEY_N: "N",
+            self._evdev.KEY_O: "O",
+            self._evdev.KEY_P: "P",
+            self._evdev.KEY_Q: "Q",
+            self._evdev.KEY_R: "R",
+            self._evdev.KEY_S: "S",
+            self._evdev.KEY_T: "T",
+            self._evdev.KEY_U: "U",
+            self._evdev.KEY_V: "V",
+            self._evdev.KEY_W: "W",
+            self._evdev.KEY_X: "X",
+            self._evdev.KEY_Y: "Y",
+            self._evdev.KEY_Z: "Z",
             self._evdev.KEY_KP0: "0",
             self._evdev.KEY_KP1: "1",
             self._evdev.KEY_KP2: "2",
@@ -320,8 +366,6 @@ class CardReader:
         }
         if code in mapping:
             return mapping[code]
-        if self._evdev.KEY_A <= code <= self._evdev.KEY_Z:
-            return chr(ord("A") + code - self._evdev.KEY_A)
         return None
 
     def wait_for_uid(self) -> str:
@@ -333,6 +377,7 @@ class CardReader:
             for event in self.reader.read_loop():
                 if event.type != self._evdev.EV_KEY or event.value != 1:
                     continue
+                log("RFID-RAW", f"key code={event.code} name={self._evdev.KEY.get(event.code, event.code)}")
                 if event.code in (self._evdev.KEY_ENTER, self._evdev.KEY_KPENTER):
                     uid = self._rfid_buffer.strip()
                     self._rfid_buffer = ""
@@ -433,8 +478,12 @@ class Vision:
         self.camera.stop()
 
 
-def points_for(weight_kg: float) -> int:
-    return round(weight_kg * config.POINTS_PER_KG)
+def points_for_bottle() -> int:
+    return int(config.POINTS_PER_BOTTLE)
+
+
+def loadcell_enabled() -> bool:
+    return bool(getattr(config, "LOADCELL_ENABLED", False))
 
 
 def process_item(session: Session, esp: Esp32Uart | MockEsp32, vision: Vision, display) -> None:
@@ -456,28 +505,34 @@ def process_item(session: Session, esp: Esp32Uart | MockEsp32, vision: Vision, d
         esp.command("reject", timeout_sec=config.UART_ACTION_TIMEOUT_SEC)
         return
 
-    display.update(status="Weighing", last_event="Bottle detected. Reading weight.")
-    weight_response = esp.command("weight", timeout_sec=config.UART_COMMAND_TIMEOUT_SEC)
-    weight_kg = round(float(weight_response["weight_kg"]), 3)
-    log("WEIGHT", f"{weight_kg:.3f} kg")
-    if not config.MIN_WEIGHT_KG <= weight_kg <= config.MAX_WEIGHT_KG:
-        session.rejected_items += 1
-        log("REJECT", "Bottle detected, but weight is outside allowed range.")
-        display.update(
-            status="Rejected",
-            rejected=session.rejected_items,
-            weight=weight_kg,
-            last_event=f"Rejected: weight {weight_kg:.3f} kg is outside range.",
-        )
-        esp.command("reject", timeout_sec=config.UART_ACTION_TIMEOUT_SEC)
-        return
+    if loadcell_enabled():
+        display.update(status="Weighing", last_event="Bottle detected. Reading loadcell.")
+        weight_response = esp.command("weight", timeout_sec=config.UART_COMMAND_TIMEOUT_SEC)
+        weight_kg = round(float(weight_response["weight_kg"]), 3)
+        log("WEIGHT", f"{weight_kg:.3f} kg")
+        min_weight = float(getattr(config, "MIN_WEIGHT_KG", 0.0))
+        max_weight = float(getattr(config, "MAX_WEIGHT_KG", 999.0))
+        if not min_weight <= weight_kg <= max_weight:
+            session.rejected_items += 1
+            log("REJECT", "Bottle detected, but weight is outside allowed range.")
+            display.update(
+                status="Rejected",
+                rejected=session.rejected_items,
+                last_event=f"Rejected: weight {weight_kg:.3f} kg is outside range.",
+            )
+            esp.command("reject", timeout_sec=config.UART_ACTION_TIMEOUT_SEC)
+            return
+        session.total_weight_kg = round(session.total_weight_kg + weight_kg, 3)
+    else:
+        weight_kg = 0.0
+        log("WEIGHT", "Loadcell disabled; skipping weight.")
 
-    points = points_for(weight_kg)
-    session.add_bottle(weight_kg, points)
+    points = points_for_bottle()
+    session.add_bottle(points)
     log("ACCEPT", f"Added bottle: +{points} points")
     log(
         "TOTAL",
-        f"{session.accepted_bottles} bottles, {session.total_weight_kg:.3f} kg, {session.total_points} points",
+        f"{session.accepted_bottles} bottles, {session.total_points} points",
     )
     display.update(
         status="Accepted",
@@ -485,7 +540,7 @@ def process_item(session: Session, esp: Esp32Uart | MockEsp32, vision: Vision, d
         rejected=session.rejected_items,
         weight=session.total_weight_kg,
         points=session.total_points,
-        last_event=f"Accepted bottle: {weight_kg:.3f} kg, +{points} points.",
+        last_event=f"Accepted bottle: +{points} points.",
     )
     esp.command("sort", timeout_sec=config.UART_ACTION_TIMEOUT_SEC)
 
@@ -547,7 +602,7 @@ def run_session(uid: str, backend: SupabaseBackend, esp: Esp32Uart | MockEsp32, 
 
     log(
         "SESSION",
-        f"Ending: {session.accepted_bottles} bottles, {session.total_weight_kg:.3f} kg, {session.total_points} points.",
+        f"Ending: {session.accepted_bottles} bottles, {session.total_points} points.",
     )
     if session.accepted_bottles == 0:
         log("SESSION", "Nothing accepted; no Supabase transaction submitted.")
@@ -584,7 +639,7 @@ def main() -> int:
             log("UART", f"Serial port opened on {config.UART_PORT} at {config.UART_BAUD}.")
             display.update(esp32="UART Open", last_event="UART serial port opened.")
         else:
-            esp = MockEsp32()
+            esp = MockEsp32(display)
         if not esp.verify_connection():
             display.update(status="ESP32 Offline", esp32="No Ping", last_event="ESP32 did not answer ping.")
             return 1

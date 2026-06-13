@@ -1,7 +1,12 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <ESP32Servo.h>
+
+#define USE_LOADCELL 0
+
+#if USE_LOADCELL
 #include <HX711.h>
+#endif
 
 // UART wiring: Raspberry Pi TX -> ESP32 RX2, Pi RX -> ESP32 TX2, GND -> GND.
 // ESP32 RX2/TX2 default here: GPIO16/GPIO17.
@@ -17,8 +22,11 @@ const uint8_t DROP_SERVO_PIN = 14;
 const uint8_t RELAY_1_PIN = 26;
 const uint8_t RELAY_2_PIN = 27;
 const uint8_t END_BUTTON_PIN = 32;       // Button to GND, uses INPUT_PULLUP.
+
+#if USE_LOADCELL
 const uint8_t LOADCELL_DOUT_PIN = 4;
 const uint8_t LOADCELL_SCK_PIN = 15;
+#endif
 
 const bool RELAY_ACTIVE_LOW = true;
 const float DETECT_DISTANCE_CM = 12.0;
@@ -32,13 +40,18 @@ const int HATCH_CLOSED_DEG = 95;
 const int DROP_CLOSED_DEG = 15;
 const int DROP_OPEN_DEG = 95;
 
+#if USE_LOADCELL
 // Calibrate this with your load cell. Positive/negative sign depends on wiring.
 const float LOADCELL_CALIBRATION_FACTOR = -7050.0;
+#endif
 
 HardwareSerial PiSerial(2);
 Servo hatchServo;
 Servo dropServo;
+
+#if USE_LOADCELL
 HX711 scale;
+#endif
 
 enum ActionState {
   IDLE,
@@ -117,7 +130,12 @@ void sendStatus(const char *cmd = "status") {
   doc["session_active"] = sessionActive;
   doc["armed"] = armedForItem;
   doc["item_held"] = itemHeld;
+#if USE_LOADCELL
   doc["scale_ready"] = scaleReady;
+#else
+  doc["scale_ready"] = false;
+  doc["loadcell_enabled"] = false;
+#endif
   sendJson(doc);
 }
 
@@ -253,6 +271,7 @@ void handleCommand(const String &line) {
     resetMechanism();
     sendAck("reset");
   } else if (cmd == "weight") {
+#if USE_LOADCELL
     if (action != HOLDING_ITEM || !itemHeld) {
       sendAck("weight", false, "no_item_held");
       return;
@@ -271,6 +290,9 @@ void handleCommand(const String &line) {
     doc["state"] = stateName();
     doc["weight_kg"] = weightKg;
     sendJson(doc);
+#else
+    sendAck("weight", false, "loadcell_disabled");
+#endif
   } else if (cmd == "sort") {
     if (action != HOLDING_ITEM || !itemHeld) {
       sendAck("sort", false, "no_item_held");
@@ -337,6 +359,7 @@ void setup() {
   hatchServo.write(HATCH_OPEN_DEG);
   dropServo.write(DROP_CLOSED_DEG);
 
+#if USE_LOADCELL
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   scale.set_scale(LOADCELL_CALIBRATION_FACTOR);
   if (scale.is_ready()) {
@@ -347,6 +370,9 @@ void setup() {
   } else {
     Serial.println("[LOADCELL][ERROR] HX711 not ready. Check wiring.");
   }
+#else
+  Serial.println("[LOADCELL] Disabled. Accept/reject uses YOLO only.");
+#endif
 
   sendEvent("ready");
 }

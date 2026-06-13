@@ -11,8 +11,7 @@ Pi reads RFID
 -> ESP32 closes hatch and sends item_detected to Pi
 -> Pi runs YOLO on camera frame
 -> invalid: Pi sends reject to ESP32
--> valid bottle: Pi requests HX711 weight from ESP32
--> Pi calculates points
+-> valid bottle: Pi adds fixed bottle points
 -> Pi sends sort to ESP32
 -> ESP32 runs relay 1, relay 2, and drop servo
 -> repeat until ESP32 END button is pressed
@@ -72,29 +71,29 @@ Change these constants at the top of the Arduino sketch if your wiring differs.
 | Relay 1 | GPIO26 |
 | Relay 2 | GPIO27 |
 | END button to GND | GPIO32 |
-| HX711 DOUT | GPIO4 |
-| HX711 SCK | GPIO15 |
 
 Important notes:
 
 - Many ultrasonic sensors output 5 V on ECHO; level shift/divide it to 3.3 V.
 - Power servos, relays, and actuator hardware from a proper external supply.
 - Share ground between ESP32, sensor modules, relay supply, and actuator supply.
-- Calibrate `LOADCELL_CALIBRATION_FACTOR` before trusting weight.
+- Loadcell/HX711 is disabled for the current accept/reject build.
 
 Arduino IDE libraries:
 
 ```text
 ArduinoJson
 ESP32Servo
-HX711 Arduino Library
 ```
+
+If you later set `USE_LOADCELL 1` in the ESP32 sketch, install `HX711 Arduino
+Library` and wire/calibrate the HX711 pins in the sketch.
 
 Upload `smart_bin_esp32.ino`, open Serial Monitor at `115200`, and check for:
 
 ```text
 [BOOT] ESP32 UART hardware controller starting
-[LOADCELL] Ready.
+[LOADCELL] Disabled. Accept/reject uses YOLO only.
 ```
 
 ## Pi Setup
@@ -156,6 +155,8 @@ BOTTLE_LABEL = "bottle"
 
 RFID_MODE = "usb_event"
 RFID_INPUT_DEVICE = ""
+LOADCELL_ENABLED = False
+POINTS_PER_BOTTLE = 1
 ```
 
 `usb_event` reads the USB RFID scanner directly from Linux input events, so it
@@ -188,7 +189,7 @@ DISPLAY_FPS = 20
 ```
 
 When enabled, the dashboard shows RFID/session state, ESP32 status, YOLO labels
-and confidence, accepted/rejected counts, weight, points, and the latest event.
+and confidence, accepted/rejected counts, points, and the latest event.
 If no desktop `DISPLAY` exists, it tries the Pi direct display through SDL
 `kmsdrm`. If pygame/display startup fails, the main machine still runs in the
 terminal.
@@ -200,8 +201,18 @@ ESP32_ENABLED = False
 ```
 
 Then the Pi skips UART ping, lets you press Enter to simulate item detection,
-asks for simulated weight in the terminal, still runs YOLO, and can still save
-totals to Supabase.
+still runs YOLO, and can still save totals to Supabase.
+
+If `DISPLAY_ENABLED = True` too, the pygame screen owns the keyboard focus:
+press `Enter` on the display to simulate ultrasonic item detection, or press
+`E` to simulate the END button. If the display is disabled or closes, terminal
+input is used instead.
+
+This display-key mock is only for testing without the ESP32. When
+`ESP32_ENABLED = True`, the Pi ignores the display Enter/E mock controls for
+item detection and waits for the real ESP32 UART events instead. In the real
+machine flow, the ultrasonic sensor on the ESP32 sends `item_detected` over
+UART, and that is what makes the Pi capture a camera frame and run YOLO.
 
 ## Supabase
 
@@ -211,7 +222,7 @@ Tables:
 
 | Table | Purpose |
 | --- | --- |
-| `recycling_users` | RFID, student ID, accumulated points, weight, and bottle count |
+| `recycling_users` | RFID, student ID, accumulated points, and bottle count |
 | `recycling_sessions` | Completed session history |
 
 Unknown RFID cards prompt for student ID in the Pi terminal and create a new
@@ -251,8 +262,8 @@ the blocker. Check `RFID_INPUT_DEVICE`, USB scanner power, and Linux input
 permissions.
 
 Then insert a bottle. ESP32 should detect it, close the hatch, and tell the Pi.
-The Pi runs YOLO, asks ESP32 for load-cell weight, calculates points, and tells
-ESP32 to sort/drop.
+The Pi runs YOLO and tells ESP32 to accept/sort or reject/drop. Points are fixed
+per accepted bottle using `POINTS_PER_BOTTLE`.
 
 Press the physical END button on the ESP32 when the user is finished. The Pi
 saves totals to Supabase and returns to waiting for the next RFID card.
@@ -269,13 +280,12 @@ Menu:
 
 ```text
 1. Start/arm session
-2. Read load-cell weight
-3. Reject/drop sequence
-4. Relay 1, relay 2, drop sequence
-5. End/reset session
-6. Print ESP32 status
-7. Ping ESP32 UART
-8. Reset/open mechanism
+2. Reject/drop sequence
+3. Accept: relay 1, relay 2, drop sequence
+4. End/reset session
+5. Print ESP32 status
+6. Ping ESP32 UART
+7. Reset/open mechanism
 ```
 
 For commands that require an item to be held, first choose `1`, then trigger the

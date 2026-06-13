@@ -12,13 +12,12 @@ import config
 
 COMMANDS = {
     "1": ("start_session", "Start/arm session"),
-    "2": ("weight", "Read load-cell weight"),
-    "3": ("reject", "Reject/drop sequence"),
-    "4": ("sort", "Relay 1, relay 2, drop sequence"),
-    "5": ("end_session", "End/reset session"),
-    "6": ("status", "Print ESP32 status"),
-    "7": ("ping", "Ping ESP32 UART"),
-    "8": ("reset", "Reset/open mechanism"),
+    "2": ("reject", "Reject/drop sequence"),
+    "3": ("sort", "Accept: relay 1, relay 2, drop sequence"),
+    "4": ("end_session", "End/reset session"),
+    "5": ("status", "Print ESP32 status"),
+    "6": ("ping", "Ping ESP32 UART"),
+    "7": ("reset", "Reset/open mechanism"),
 }
 
 
