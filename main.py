@@ -1,4 +1,4 @@
-from __future__ import annotations
+ from __future__ import annotations
 
 import dataclasses
 import json
@@ -11,6 +11,7 @@ from typing import Any
 import cv2
 import requests
 import serial
+from display_status import create_display
 from picamera2 import Picamera2
 from ultralytics import YOLO
 
@@ -206,15 +207,167 @@ class Esp32Uart:
     def wait_for_event(self) -> dict[str, Any] | None:
         return self.read_message(timeout_sec=config.UART_EVENT_TIMEOUT_SEC)
 
+    def verify_connection(self) -> bool:
+        try:
+            response = self.command("ping", timeout_sec=config.UART_COMMAND_TIMEOUT_SEC)
+        except (RuntimeError, TimeoutError, serial.SerialException) as exc:
+            log("UART", f"ESP32 did not answer ping: {exc}")
+            log("UART", "Check ESP32 power, uploaded UART sketch, Pi TX/RX crossing, and shared GND.")
+            return False
+        log("UART", f"ESP32 ping OK: {response}")
+        return True
+
+
+class MockEsp32:
+    def close(self) -> None:
+        return
+
+    def verify_connection(self) -> bool:
+        log("ESP32", "ESP32_ENABLED is False; using terminal mock instead of UART hardware.")
+        return True
+
+    def command(self, command: str, timeout_sec: float | None = None) -> dict[str, Any]:
+        log("MOCK-ESP32", f"Command: {command}")
+        if command == "weight":
+            while True:
+                value = input("Simulated weight - type bottle weight in kg: ").strip()
+                try:
+                    return {"cmd": "weight", "ok": True, "weight_kg": round(float(value), 3)}
+                except ValueError:
+                    log("WEIGHT", "Invalid number. Example: 0.250")
+        return {"cmd": command, "ok": True, "state": "mock"}
+
+    def wait_for_event(self) -> dict[str, Any] | None:
+        choice = input("\nPress Enter to simulate item detection, or type end to finish: ").strip().lower()
+        if choice == "end":
+            return {"event": "end_pressed"}
+        if choice:
+            log("INPUT", "Unknown command. Press Enter for item detection or type end.")
+            return None
+        return {"event": "item_detected"}
+
 
 class CardReader:
     def __init__(self) -> None:
-        from mfrc522 import SimpleMFRC522
+        self.mode = getattr(config, "RFID_MODE", "usb_keyboard")
+        self.reader = None
+        self._evdev = None
+        self._rfid_buffer = ""
 
-        self.reader = SimpleMFRC522()
+        if self.mode == "rc522":
+            from mfrc522 import SimpleMFRC522
+
+            self.reader = SimpleMFRC522()
+        elif self.mode == "usb_event":
+            self.reader = self._open_usb_event_reader()
+        elif self.mode != "usb_keyboard":
+            raise ValueError(f"Unknown RFID_MODE: {self.mode}")
+
+    def _open_usb_event_reader(self):
+        from evdev import InputDevice, ecodes, list_devices
+
+        self._evdev = ecodes
+        configured = getattr(config, "RFID_INPUT_DEVICE", "").strip()
+        if configured:
+            device = InputDevice(configured)
+            log("RFID", f"Using USB input device: {configured} ({device.name})")
+            return device
+
+        candidates = []
+        for path in list_devices():
+            device = InputDevice(path)
+            capabilities = device.capabilities()
+            key_codes = capabilities.get(ecodes.EV_KEY, [])
+            if ecodes.KEY_ENTER in key_codes and any(
+                code in key_codes for code in (ecodes.KEY_0, ecodes.KEY_1, ecodes.KEY_A)
+            ):
+                candidates.append(device)
+
+        if len(candidates) == 1:
+            device = candidates[0]
+            log("RFID", f"Auto-selected USB RFID input: {device.path} ({device.name})")
+            return device
+
+        log("RFID", "Set RFID_INPUT_DEVICE in config.py to one of these candidates:")
+        for device in candidates:
+            log("RFID", f"  {device.path}  {device.name}")
+        raise RuntimeError("Could not auto-select USB RFID input device")
+
+    def _key_to_char(self, code: int) -> str | None:
+        assert self._evdev is not None
+        mapping = {
+            self._evdev.KEY_0: "0",
+            self._evdev.KEY_1: "1",
+            self._evdev.KEY_2: "2",
+            self._evdev.KEY_3: "3",
+            self._evdev.KEY_4: "4",
+            self._evdev.KEY_5: "5",
+            self._evdev.KEY_6: "6",
+            self._evdev.KEY_7: "7",
+            self._evdev.KEY_8: "8",
+            self._evdev.KEY_9: "9",
+            self._evdev.KEY_KP0: "0",
+            self._evdev.KEY_KP1: "1",
+            self._evdev.KEY_KP2: "2",
+            self._evdev.KEY_KP3: "3",
+            self._evdev.KEY_KP4: "4",
+            self._evdev.KEY_KP5: "5",
+            self._evdev.KEY_KP6: "6",
+            self._evdev.KEY_KP7: "7",
+            self._evdev.KEY_KP8: "8",
+            self._evdev.KEY_KP9: "9",
+            self._evdev.KEY_MINUS: "-",
+        }
+        if code in mapping:
+            return mapping[code]
+        if self._evdev.KEY_A <= code <= self._evdev.KEY_Z:
+            return chr(ord("A") + code - self._evdev.KEY_A)
+        return None
 
     def wait_for_uid(self) -> str:
-        log("RFID", "Tap RFID card to start.")
+        if self.mode == "usb_event":
+            log("RFID", "Scan USB RFID card now. Reading directly from /dev/input.")
+            assert self.reader is not None
+            assert self._evdev is not None
+            self._rfid_buffer = ""
+            for event in self.reader.read_loop():
+                if event.type != self._evdev.EV_KEY or event.value != 1:
+                    continue
+                if event.code in (self._evdev.KEY_ENTER, self._evdev.KEY_KPENTER):
+                    uid = self._rfid_buffer.strip()
+                    self._rfid_buffer = ""
+                    if uid:
+                        log("RFID", f"Card read: {uid}")
+                        time.sleep(config.RFID_DEBOUNCE_SEC)
+                        return uid
+                    continue
+                char = self._key_to_char(event.code)
+                if char is not None:
+                    self._rfid_buffer += char
+
+        if self.mode == "usb_keyboard":
+            log("RFID", "Scan USB RFID card now. It should type the UID and press Enter.")
+            while True:
+                uid = input("RFID UID: ").strip()
+                if uid:
+                    log("RFID", f"Card read: {uid}")
+                    time.sleep(config.RFID_DEBOUNCE_SEC)
+                    return uid
+                log("RFID", "No UID received. Make sure this terminal is focused before scanning.")
+
+        log("RFID", "Tap RC522 RFID card to start.")
+        assert self.reader is not None
+        if not hasattr(self.reader, "read_no_block"):
+            log(
+                "RFID",
+                "Using blocking RC522 read(). If this stays here, check SPI is enabled and RC522 wiring/power.",
+            )
+            card_id, _ = self.reader.read()
+            uid = str(card_id)
+            log("RFID", f"Card read: {uid}")
+            time.sleep(config.RFID_DEBOUNCE_SEC)
+            return uid
+
         while True:
             card_id, _ = self.reader.read_no_block()
             if card_id is not None:
@@ -222,12 +375,18 @@ class CardReader:
                 log("RFID", f"Card read: {uid}")
                 time.sleep(config.RFID_DEBOUNCE_SEC)
                 return uid
+            if int(time.monotonic()) % 5 == 0:
+                log("RFID", "Still waiting for card...")
+                time.sleep(1)
             time.sleep(0.1)
 
     def close(self) -> None:
-        import RPi.GPIO as GPIO
+        if self.mode == "rc522":
+            import RPi.GPIO as GPIO
 
-        GPIO.cleanup()
+            GPIO.cleanup()
+        elif self.mode == "usb_event" and self.reader is not None:
+            self.reader.close()
 
 
 class Vision:
@@ -278,24 +437,38 @@ def points_for(weight_kg: float) -> int:
     return round(weight_kg * config.POINTS_PER_KG)
 
 
-def process_item(session: Session, esp: Esp32Uart, vision: Vision) -> None:
+def process_item(session: Session, esp: Esp32Uart | MockEsp32, vision: Vision, display) -> None:
     log("ITEM", "ESP32 reports item detected and hatch closed. Running YOLO.")
+    display.update(status="Inspecting", last_event="Item detected. Running YOLO.")
     detection = vision.inspect_item()
     label_text = ", ".join(sorted(detection.labels)) or "none"
     log("VISION", f"Labels: {label_text}; bottle confidence: {detection.bottle_confidence:.2f}")
+    display.update(labels=label_text, confidence=detection.bottle_confidence, last_event=f"YOLO labels: {label_text}")
 
     if not detection.accepted:
         session.rejected_items += 1
         log("REJECT", "YOLO did not detect a bottle.")
+        display.update(
+            status="Rejected",
+            rejected=session.rejected_items,
+            last_event="Rejected: YOLO did not detect a bottle.",
+        )
         esp.command("reject", timeout_sec=config.UART_ACTION_TIMEOUT_SEC)
         return
 
+    display.update(status="Weighing", last_event="Bottle detected. Reading weight.")
     weight_response = esp.command("weight", timeout_sec=config.UART_COMMAND_TIMEOUT_SEC)
     weight_kg = round(float(weight_response["weight_kg"]), 3)
     log("WEIGHT", f"{weight_kg:.3f} kg")
     if not config.MIN_WEIGHT_KG <= weight_kg <= config.MAX_WEIGHT_KG:
         session.rejected_items += 1
         log("REJECT", "Bottle detected, but weight is outside allowed range.")
+        display.update(
+            status="Rejected",
+            rejected=session.rejected_items,
+            weight=weight_kg,
+            last_event=f"Rejected: weight {weight_kg:.3f} kg is outside range.",
+        )
         esp.command("reject", timeout_sec=config.UART_ACTION_TIMEOUT_SEC)
         return
 
@@ -306,10 +479,19 @@ def process_item(session: Session, esp: Esp32Uart, vision: Vision) -> None:
         "TOTAL",
         f"{session.accepted_bottles} bottles, {session.total_weight_kg:.3f} kg, {session.total_points} points",
     )
+    display.update(
+        status="Accepted",
+        bottles=session.accepted_bottles,
+        rejected=session.rejected_items,
+        weight=session.total_weight_kg,
+        points=session.total_points,
+        last_event=f"Accepted bottle: {weight_kg:.3f} kg, +{points} points.",
+    )
     esp.command("sort", timeout_sec=config.UART_ACTION_TIMEOUT_SEC)
 
 
-def run_session(uid: str, backend: SupabaseBackend, esp: Esp32Uart, vision: Vision) -> None:
+def run_session(uid: str, backend: SupabaseBackend, esp: Esp32Uart | MockEsp32, vision: Vision, display) -> None:
+    display.update(status="Checking User", rfid=uid, last_event=f"RFID scanned: {uid}")
     if config.OFFLINE_TEST_MODE:
         name = f"Test user {uid}"
         log("TEST", "Offline test mode enabled; skipping Supabase calls.")
@@ -321,30 +503,47 @@ def run_session(uid: str, backend: SupabaseBackend, esp: Esp32Uart, vision: Visi
 
     session = Session(uid=uid, user_name=name)
     log("SESSION", f"Started for {name}. Insert bottles; press END button when done.")
+    display.update(
+        status="Session Active",
+        student=name,
+        bottles=0,
+        rejected=0,
+        weight=0.0,
+        points=0,
+        labels="-",
+        confidence=0.0,
+        last_event=f"Session started for {name}.",
+    )
     esp.command("start_session")
 
     while True:
+        display.update(status="Waiting Item", last_event="Waiting for ultrasonic item event or END.")
         event = esp.wait_for_event()
         if event is None:
             continue
         event_name = event.get("event")
         if event_name == "item_detected":
             try:
-                process_item(session, esp, vision)
+                process_item(session, esp, vision, display)
             except (RuntimeError, TimeoutError, KeyError, ValueError) as exc:
                 log("ITEM", f"Processing error: {exc}")
+                display.update(status="Error", last_event=f"Processing error: {exc}")
                 try:
                     esp.command("reject", timeout_sec=config.UART_ACTION_TIMEOUT_SEC)
                 except Exception as reject_exc:
                     log("ESP32", f"Reject command failed: {reject_exc}")
+                    display.update(status="Error", last_event=f"Reject command failed: {reject_exc}")
         elif event_name == "end_pressed":
             log("SESSION", "END button pressed.")
+            display.update(status="Ending", last_event="END pressed. Closing session.")
             esp.command("end_session")
             break
         elif event_name == "ready":
             log("ESP32", "Controller ready.")
+            display.update(esp32="Ready", last_event="ESP32 controller ready.")
         elif event_name == "error":
             log("ESP32", str(event))
+            display.update(status="ESP32 Error", last_event=str(event))
 
     log(
         "SESSION",
@@ -352,12 +551,16 @@ def run_session(uid: str, backend: SupabaseBackend, esp: Esp32Uart, vision: Visi
     )
     if session.accepted_bottles == 0:
         log("SESSION", "Nothing accepted; no Supabase transaction submitted.")
+        display.update(status="Waiting RFID", student="-", last_event="Session ended with no accepted bottles.")
     elif config.OFFLINE_TEST_MODE:
         log("TEST", "Offline test mode: totals shown above, Supabase submission skipped.")
+        display.update(status="Waiting RFID", student="-", last_event="Offline session ended; Supabase skipped.")
     elif backend.confirm_session(session):
         log("SESSION", "Transaction saved successfully.")
+        display.update(status="Saved", student="-", last_event="Session saved to Supabase.")
     else:
         log("SESSION", "Supabase submission failed; keep this terminal output for recovery.")
+        display.update(status="Save Failed", last_event="Supabase submission failed.")
 
 
 def main() -> int:
@@ -365,20 +568,37 @@ def main() -> int:
     if config.OFFLINE_TEST_MODE:
         log("TEST", "OFFLINE_TEST_MODE is enabled. No Supabase data will be sent.")
     backend = SupabaseBackend()
-    esp: Esp32Uart | None = None
+    esp: Esp32Uart | MockEsp32 | None = None
     reader: CardReader | None = None
     vision: Vision | None = None
+    display = create_display(
+        getattr(config, "DISPLAY_ENABLED", False),
+        getattr(config, "DISPLAY_WIDTH", 800),
+        getattr(config, "DISPLAY_HEIGHT", 480),
+        getattr(config, "DISPLAY_FPS", 20),
+    )
     try:
-        esp = Esp32Uart()
-        log("UART", f"Connected on {config.UART_PORT} at {config.UART_BAUD}.")
+        display.update(status="Booting", last_event="Starting machine controller.")
+        if getattr(config, "ESP32_ENABLED", True):
+            esp = Esp32Uart()
+            log("UART", f"Serial port opened on {config.UART_PORT} at {config.UART_BAUD}.")
+            display.update(esp32="UART Open", last_event="UART serial port opened.")
+        else:
+            esp = MockEsp32()
+        if not esp.verify_connection():
+            display.update(status="ESP32 Offline", esp32="No Ping", last_event="ESP32 did not answer ping.")
+            return 1
+        display.update(esp32="Connected" if getattr(config, "ESP32_ENABLED", True) else "Mock")
         reader = CardReader()
         vision = Vision()
         while True:
+            display.update(status="Waiting RFID", rfid="-", student="-", last_event="Waiting for RFID card.")
             uid = reader.wait_for_uid()
             if uid:
-                run_session(uid, backend, esp, vision)
+                run_session(uid, backend, esp, vision, display)
     except KeyboardInterrupt:
         log("BOOT", "Stopped.")
+        display.update(status="Stopped", last_event="Stopped by keyboard interrupt.")
         return 0
     finally:
         if reader is not None:
@@ -387,6 +607,7 @@ def main() -> int:
             vision.close()
         if esp is not None:
             esp.close()
+        display.stop()
     return 0
 
 
