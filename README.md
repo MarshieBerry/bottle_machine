@@ -1,9 +1,10 @@
-# bottle_machine
-
 # Smart Bottle Machine Build Version
 
+This version uses real hardware inputs and UART between the Raspberry Pi and
+ESP32.
+
 ```text
-Pi RC522 reads RFID
+Pi reads RFID
 -> Pi checks/creates user in Supabase
 -> Pi sends start_session to ESP32 over UART
 -> ESP32 ultrasonic detects inserted item
@@ -22,9 +23,10 @@ For now the only accepted YOLO label is `bottle`.
 
 ## Files
 
-- `pi/main.py`: Pi controller for RFID, YOLO, Supabase, and UART protocol.
+- `pi/main.py`: Pi controller for USB/RC522 RFID, YOLO, Supabase, and UART protocol.
+- `pi/display_status.py`: optional full-screen pygame status dashboard.
 - `pi/test.py`: UART command tester for ESP32 hardware.
-- `config.py` and edit private settings.
+- `pi/config.example.py`: copy to `config.py` and edit private settings.
 - `esp32/smart_bin_esp32/smart_bin_esp32.ino`: ESP32 UART hardware controller.
 - `supabase/setup.sql`: Supabase tables and session-saving function.
 
@@ -97,7 +99,8 @@ Upload `smart_bin_esp32.ino`, open Serial Monitor at `115200`, and check for:
 
 ## Pi Setup
 
-Install non-YOLO support packages:
+Install non-YOLO support packages. For a USB RFID scanner you do not need
+RC522/SPI packages, but they are harmless if already installed.
 
 ```bash
 sudo apt update
@@ -116,13 +119,16 @@ pip install -r requirements.txt
 requests
 pyserial
 mfrc522-python
+pygame
+evdev
 ultralytics==8.3.70
 torch==2.5.0
 torchvision==0.20
 ```
 
 If Ultralytics/Torch/Torchvision are already installed correctly on your Pi 4,
-you only need missing packages such as `pyserial` and `mfrc522-python`.
+you only need missing packages such as `pyserial`, `pygame`, and
+`evdev`.
 
 ## Pi Config
 
@@ -136,6 +142,7 @@ nano config.py
 Set at minimum:
 
 ```python
+ESP32_ENABLED = True
 UART_PORT = "/dev/serial0"
 UART_BAUD = 115200
 
@@ -146,7 +153,55 @@ KIOSK_ID = "pi-bottle-machine-01"
 
 YOLO_MODEL_PATH = "yolov8n.pt"
 BOTTLE_LABEL = "bottle"
+
+RFID_MODE = "usb_event"
+RFID_INPUT_DEVICE = ""
 ```
+
+`usb_event` reads the USB RFID scanner directly from Linux input events, so it
+continues working even when the pygame dashboard owns the screen. If auto-detect
+cannot choose the scanner, find the device with:
+
+```bash
+ls -l /dev/input/by-id/
+```
+
+Then set something like:
+
+```python
+RFID_INPUT_DEVICE = "/dev/input/by-id/usb-YOUR_RFID_READER-event-kbd"
+```
+
+If permission is denied, add your user to the input group and log out/in:
+
+```bash
+sudo usermod -aG input $USER
+```
+
+Optional screen dashboard:
+
+```python
+DISPLAY_ENABLED = True
+DISPLAY_WIDTH = 800
+DISPLAY_HEIGHT = 480
+DISPLAY_FPS = 20
+```
+
+When enabled, the dashboard shows RFID/session state, ESP32 status, YOLO labels
+and confidence, accepted/rejected counts, weight, points, and the latest event.
+If no desktop `DISPLAY` exists, it tries the Pi direct display through SDL
+`kmsdrm`. If pygame/display startup fails, the main machine still runs in the
+terminal.
+
+If you want to test without the ESP32 connected, set:
+
+```python
+ESP32_ENABLED = False
+```
+
+Then the Pi skips UART ping, lets you press Enter to simulate item detection,
+asks for simulated weight in the terminal, still runs YOLO, and can still save
+totals to Supabase.
 
 ## Supabase
 
@@ -171,9 +226,29 @@ python main.py
 Expected flow:
 
 ```text
-[RFID] Tap RFID card to start.
+[UART] Serial port opened on /dev/serial0 at 115200.
+[UART->ESP] {"cmd":"ping"}
+[UART<-ESP] {"cmd":"ping","ok":true,...}
+[UART] ESP32 ping OK: ...
+[RFID] Scan USB RFID card now. Reading directly from /dev/input.
 [SESSION] Started for ...
 ```
+
+Without ESP32 connected, expected startup is:
+
+```text
+[ESP32] ESP32_ENABLED is False; using terminal mock instead of UART hardware.
+[RFID] Scan USB RFID card now. Reading directly from /dev/input.
+```
+
+Opening `/dev/serial0` only proves the Pi UART exists. The `ping` reply proves
+the ESP32 is powered, flashed with the UART sketch, wired with crossed TX/RX,
+and sharing GND.
+
+If the Pi prints `ESP32 did not answer ping`, fix ESP32/UART before testing the
+machine. If it reaches the RFID input message and waits, the ESP32 is no longer
+the blocker. Check `RFID_INPUT_DEVICE`, USB scanner power, and Linux input
+permissions.
 
 Then insert a bottle. ESP32 should detect it, close the hatch, and tell the Pi.
 The Pi runs YOLO, asks ESP32 for load-cell weight, calculates points, and tells
