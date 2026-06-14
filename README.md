@@ -1,4 +1,4 @@
-# Smart Bottle Machine Build Version
+# Smart Bottle Machine Build V0.2
 
 This version uses real hardware inputs and UART between the Raspberry Pi and
 ESP32.
