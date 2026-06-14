@@ -12,8 +12,8 @@ import config
 
 COMMANDS = {
     "1": ("start_session", "Start/arm session"),
-    "2": ("reject", "Reject/drop sequence"),
-    "3": ("sort", "Accept: relay 1, relay 2, drop sequence"),
+    "2": ("reject", "Reject: sorter servo to reject side"),
+    "3": ("sort", "Accept: sorter servo to accept side"),
     "4": ("end_session", "End/reset session"),
     "5": ("status", "Print ESP32 status"),
     "6": ("ping", "Ping ESP32 UART"),

@@ -18,7 +18,7 @@ const uint8_t UART_TX_PIN = 17;
 const uint8_t ULTRASONIC_TRIG_PIN = 5;
 const uint8_t ULTRASONIC_ECHO_PIN = 18;  // Use level shifting if the sensor echoes 5 V.
 const uint8_t HATCH_SERVO_PIN = 13;
-const uint8_t DROP_SERVO_PIN = 14;
+const uint8_t SORTER_SERVO_PIN = 14;
 const uint8_t RELAY_1_PIN = 26;
 const uint8_t RELAY_2_PIN = 27;
 const uint8_t END_BUTTON_PIN = 32;       // Button to GND, uses INPUT_PULLUP.
@@ -32,13 +32,13 @@ const bool RELAY_ACTIVE_LOW = true;
 const float DETECT_DISTANCE_CM = 12.0;
 const unsigned long OBJECT_STABLE_MS = 250;
 const unsigned long CLEAR_STABLE_MS = 800;
-const unsigned long RELAY_ON_MS = 5000;
-const unsigned long DROP_OPEN_MS = 1200;
+const unsigned long SORTER_HOLD_MS = 1200;
 
 const int HATCH_OPEN_DEG = 15;
 const int HATCH_CLOSED_DEG = 95;
-const int DROP_CLOSED_DEG = 15;
-const int DROP_OPEN_DEG = 95;
+const int SORTER_CENTER_DEG = 90;
+const int SORTER_ACCEPT_DEG = 140;
+const int SORTER_REJECT_DEG = 40;
 
 #if USE_LOADCELL
 // Calibrate this with your load cell. Positive/negative sign depends on wiring.
@@ -47,7 +47,7 @@ const float LOADCELL_CALIBRATION_FACTOR = -7050.0;
 
 HardwareSerial PiSerial(2);
 Servo hatchServo;
-Servo dropServo;
+Servo sorterServo;
 
 #if USE_LOADCELL
 HX711 scale;
@@ -56,10 +56,8 @@ HX711 scale;
 enum ActionState {
   IDLE,
   HOLDING_ITEM,
-  SORT_RELAY_1,
-  SORT_RELAY_2,
-  DROP_ACCEPTED,
-  DROP_REJECTED
+  SORT_ACCEPTED,
+  SORT_REJECTED
 };
 
 ActionState action = IDLE;
@@ -87,10 +85,8 @@ String stateName() {
   switch (action) {
     case IDLE: return "idle";
     case HOLDING_ITEM: return "holding_item";
-    case SORT_RELAY_1: return "sort_relay_1";
-    case SORT_RELAY_2: return "sort_relay_2";
-    case DROP_ACCEPTED: return "drop_accepted";
-    case DROP_REJECTED: return "drop_rejected";
+    case SORT_ACCEPTED: return "sort_accepted";
+    case SORT_REJECTED: return "sort_rejected";
   }
   return "unknown";
 }
@@ -154,7 +150,7 @@ float readDistanceCm() {
 
 void resetMechanism() {
   allRelaysOff();
-  dropServo.write(DROP_CLOSED_DEG);
+  sorterServo.write(SORTER_CENTER_DEG);
   hatchServo.write(HATCH_OPEN_DEG);
   itemHeld = false;
   armedForItem = false;
@@ -172,7 +168,7 @@ void armSession() {
   clearStartedMs = 0;
   action = IDLE;
   allRelaysOff();
-  dropServo.write(DROP_CLOSED_DEG);
+  sorterServo.write(SORTER_CENTER_DEG);
   hatchServo.write(HATCH_OPEN_DEG);
 }
 
@@ -226,17 +222,7 @@ void updateObjectSensor() {
 
 void updateMechanism() {
   unsigned long elapsed = millis() - actionStartedMs;
-  if (action == SORT_RELAY_1 && elapsed >= RELAY_ON_MS) {
-    setRelay(RELAY_1_PIN, false);
-    setRelay(RELAY_2_PIN, true);
-    action = SORT_RELAY_2;
-    actionStartedMs = millis();
-  } else if (action == SORT_RELAY_2 && elapsed >= RELAY_ON_MS) {
-    setRelay(RELAY_2_PIN, false);
-    dropServo.write(DROP_OPEN_DEG);
-    action = DROP_ACCEPTED;
-    actionStartedMs = millis();
-  } else if ((action == DROP_ACCEPTED || action == DROP_REJECTED) && elapsed >= DROP_OPEN_MS) {
+  if ((action == SORT_ACCEPTED || action == SORT_REJECTED) && elapsed >= SORTER_HOLD_MS) {
     resetMechanism();
   }
 }
@@ -299,8 +285,8 @@ void handleCommand(const String &line) {
       return;
     }
     itemHeld = false;
-    setRelay(RELAY_1_PIN, true);
-    action = SORT_RELAY_1;
+    sorterServo.write(SORTER_ACCEPT_DEG);
+    action = SORT_ACCEPTED;
     actionStartedMs = millis();
     sendAck("sort");
   } else if (cmd == "reject") {
@@ -309,8 +295,8 @@ void handleCommand(const String &line) {
       return;
     }
     itemHeld = false;
-    dropServo.write(DROP_OPEN_DEG);
-    action = DROP_REJECTED;
+    sorterServo.write(SORTER_REJECT_DEG);
+    action = SORT_REJECTED;
     actionStartedMs = millis();
     sendAck("reject");
   } else {
@@ -353,11 +339,11 @@ void setup() {
   allRelaysOff();
 
   hatchServo.setPeriodHertz(50);
-  dropServo.setPeriodHertz(50);
+  sorterServo.setPeriodHertz(50);
   hatchServo.attach(HATCH_SERVO_PIN, 500, 2400);
-  dropServo.attach(DROP_SERVO_PIN, 500, 2400);
+  sorterServo.attach(SORTER_SERVO_PIN, 500, 2400);
   hatchServo.write(HATCH_OPEN_DEG);
-  dropServo.write(DROP_CLOSED_DEG);
+  sorterServo.write(SORTER_CENTER_DEG);
 
 #if USE_LOADCELL
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);

@@ -27,6 +27,31 @@ def log(label: str, message: str) -> None:
     print(f"[{label}] {message}", flush=True)
 
 
+def ask_student_id(display) -> str | None:
+    if hasattr(display, "request_number") and getattr(display, "is_real_display", lambda: False)():
+        student_id = display.request_number("Enter 5 digit student ID", digits=5)
+        if student_id is None:
+            return None
+        if len(student_id) == 5 and student_id.isdigit():
+            return student_id
+        log("INPUT", "Touchscreen returned invalid student ID.")
+        return None
+
+    while True:
+        student_id = input("Enter 5 digit student ID to create account, or press Enter to cancel: ").strip()
+        if not student_id:
+            return None
+        if len(student_id) == 5 and student_id.isdigit():
+            return student_id
+        log("INPUT", "Student ID must be exactly 5 digits.")
+
+
+@dataclasses.dataclass
+class UserAccount:
+    student_id: str
+    total_points: int = 0
+
+
 @dataclasses.dataclass
 class Detection:
     accepted: bool
@@ -38,6 +63,7 @@ class Detection:
 class Session:
     uid: str
     user_name: str = "Unknown"
+    starting_points: int = 0
     accepted_bottles: int = 0
     rejected_items: int = 0
     total_weight_kg: float = 0.0
@@ -46,6 +72,10 @@ class Session:
     def add_bottle(self, points: int) -> None:
         self.accepted_bottles += 1
         self.total_points += points
+
+    @property
+    def display_points(self) -> int:
+        return self.starting_points + self.total_points
 
 
 class SupabaseBackend:
@@ -86,7 +116,7 @@ class SupabaseBackend:
             raise RuntimeError(f"Supabase HTTP {response.status_code}: {result}")
         return result
 
-    def find_or_register_user(self, uid: str) -> str | None:
+    def find_or_register_user(self, uid: str, display=None) -> UserAccount | None:
         try:
             rows = self.request(
                 "GET",
@@ -107,11 +137,12 @@ class SupabaseBackend:
         if rows:
             user = rows[0]
             student_id = str(user["student_id"])
-            log("USER", f"Found student ID {student_id}; current points: {user.get('total_points', 0)}")
-            return student_id
+            total_points = int(user.get("total_points", 0))
+            log("USER", f"Found student ID {student_id}; current points: {total_points}")
+            return UserAccount(student_id=student_id, total_points=total_points)
 
         log("USER", "RFID is not registered.")
-        student_id = input("Enter your student ID to create account, or press Enter to cancel: ").strip()
+        student_id = ask_student_id(display)
         if not student_id:
             return None
         try:
@@ -128,7 +159,7 @@ class SupabaseBackend:
             log("SUPABASE", "Registration returned no new user row.")
             return None
         log("USER", f"Registered student ID {student_id} to card {uid}.")
-        return student_id
+        return UserAccount(student_id=student_id, total_points=0)
 
     def confirm_session(self, session: Session) -> bool:
         payload = {
@@ -204,8 +235,10 @@ class Esp32Uart:
                 return message
         raise TimeoutError(f"No ESP32 response for command {command}")
 
-    def wait_for_event(self) -> dict[str, Any] | None:
-        return self.read_message(timeout_sec=config.UART_EVENT_TIMEOUT_SEC)
+    def wait_for_event(self, timeout_sec: float | None = None) -> dict[str, Any] | None:
+        return self.read_message(
+            timeout_sec=config.UART_EVENT_TIMEOUT_SEC if timeout_sec is None else timeout_sec
+        )
 
     def verify_connection(self) -> bool:
         try:
@@ -233,12 +266,15 @@ class MockEsp32:
         log("MOCK-ESP32", f"Command: {command}")
         return {"cmd": command, "ok": True, "state": "mock"}
 
-    def wait_for_event(self) -> dict[str, Any] | None:
+    def wait_for_event(self, timeout_sec: float | None = None) -> dict[str, Any] | None:
         if hasattr(self.display, "get_action") and getattr(self.display, "is_real_display", lambda: False)():
             log("MOCK-ESP32", "Waiting for display input: Enter=item, E=end.")
             while True:
                 if hasattr(self.display, "supports_actions") and not self.display.supports_actions():
                     break
+                if hasattr(self.display, "consume_end_request") and self.display.consume_end_request():
+                    log("MOCK-ESP32", "Display END button requested session finish.")
+                    return {"event": "end_pressed"}
                 if hasattr(self.display, "wait_for_action"):
                     action = self.display.wait_for_action(timeout_sec=0.25)
                 else:
@@ -258,6 +294,53 @@ class MockEsp32:
             log("INPUT", "Unknown command. Press Enter for item detection or type end.")
             return None
         return {"event": "item_detected"}
+
+
+def display_action_to_event(display) -> dict[str, Any] | None:
+    if hasattr(display, "consume_end_request") and display.consume_end_request():
+        log("DISPLAY", "Touch END requested session finish.")
+        return {"event": "end_pressed", "source": "display"}
+    if not hasattr(display, "get_action"):
+        return None
+    action = display.get_action()
+    if action == "end":
+        log("DISPLAY", "Touch END requested session finish.")
+        return {"event": "end_pressed", "source": "display"}
+    if action == "item":
+        return {"event": "item_detected", "source": "display"}
+    return None
+
+
+def display_end_requested(display) -> bool:
+    if hasattr(display, "consume_end_request") and display.consume_end_request():
+        log("DISPLAY", "Touch END requested session finish.")
+        return True
+    return False
+
+
+def close_session_loop(esp: Esp32Uart | MockEsp32, display) -> None:
+    log("SESSION", "END button pressed.")
+    display.update(status="Ending", last_event="END pressed. Closing session.")
+    try:
+        esp.command("end_session")
+    except (RuntimeError, TimeoutError) as exc:
+        log("ESP32", f"END command failed; closing Pi session anyway: {exc}")
+        display.update(last_event=f"END command failed; closing Pi session anyway: {exc}")
+
+
+def reset_display_for_rfid(display, message: str = "Waiting for RFID card.") -> None:
+    display.update(
+        status="Waiting RFID",
+        rfid="-",
+        student="-",
+        bottles=0,
+        rejected=0,
+        weight=0.0,
+        points=0,
+        labels="-",
+        confidence=0.0,
+        last_event=message,
+    )
 
 
 class CardReader:
@@ -532,15 +615,15 @@ def process_item(session: Session, esp: Esp32Uart | MockEsp32, vision: Vision, d
     log("ACCEPT", f"Added bottle: +{points} points")
     log(
         "TOTAL",
-        f"{session.accepted_bottles} bottles, {session.total_points} points",
+        f"{session.accepted_bottles} bottles, {session.total_points} new points, {session.display_points} account points",
     )
     display.update(
         status="Accepted",
         bottles=session.accepted_bottles,
         rejected=session.rejected_items,
         weight=session.total_weight_kg,
-        points=session.total_points,
-        last_event=f"Accepted bottle: +{points} points.",
+        points=session.display_points,
+        last_event=f"Accepted bottle: +{points} points. Total now {session.display_points}.",
     )
     esp.command("sort", timeout_sec=config.UART_ACTION_TIMEOUT_SEC)
 
@@ -548,36 +631,48 @@ def process_item(session: Session, esp: Esp32Uart | MockEsp32, vision: Vision, d
 def run_session(uid: str, backend: SupabaseBackend, esp: Esp32Uart | MockEsp32, vision: Vision, display) -> None:
     display.update(status="Checking User", rfid=uid, last_event=f"RFID scanned: {uid}")
     if config.OFFLINE_TEST_MODE:
-        name = f"Test user {uid}"
+        account = UserAccount(student_id=f"Test user {uid}", total_points=0)
         log("TEST", "Offline test mode enabled; skipping Supabase calls.")
     else:
-        name = backend.find_or_register_user(uid)
-        if name is None:
+        account = backend.find_or_register_user(uid, display)
+        if account is None:
             log("SESSION", "Cancelled; waiting for another card.")
             return
 
-    session = Session(uid=uid, user_name=name)
-    log("SESSION", f"Started for {name}. Insert bottles; press END button when done.")
+    session = Session(uid=uid, user_name=account.student_id, starting_points=account.total_points)
+    log("SESSION", f"Started for {account.student_id}. Current points: {account.total_points}. Insert bottles; press END button when done.")
     display.update(
         status="Session Active",
-        student=name,
+        student=account.student_id,
         bottles=0,
         rejected=0,
         weight=0.0,
-        points=0,
+        points=account.total_points,
         labels="-",
         confidence=0.0,
-        last_event=f"Session started for {name}.",
+        last_event=f"Session started for {account.student_id}. Current points: {account.total_points}.",
     )
     esp.command("start_session")
 
     while True:
         display.update(status="Waiting Item", last_event="Waiting for ultrasonic item event or END.")
-        event = esp.wait_for_event()
+        if display_end_requested(display):
+            close_session_loop(esp, display)
+            break
+
+        event = display_action_to_event(display)
+        if event is None:
+            event = esp.wait_for_event(timeout_sec=0.2)
+        if event is None and display_end_requested(display):
+            close_session_loop(esp, display)
+            break
         if event is None:
             continue
         event_name = event.get("event")
         if event_name == "item_detected":
+            if display_end_requested(display):
+                close_session_loop(esp, display)
+                break
             try:
                 process_item(session, esp, vision, display)
             except (RuntimeError, TimeoutError, KeyError, ValueError) as exc:
@@ -588,10 +683,11 @@ def run_session(uid: str, backend: SupabaseBackend, esp: Esp32Uart | MockEsp32, 
                 except Exception as reject_exc:
                     log("ESP32", f"Reject command failed: {reject_exc}")
                     display.update(status="Error", last_event=f"Reject command failed: {reject_exc}")
+            if display_end_requested(display):
+                close_session_loop(esp, display)
+                break
         elif event_name == "end_pressed":
-            log("SESSION", "END button pressed.")
-            display.update(status="Ending", last_event="END pressed. Closing session.")
-            esp.command("end_session")
+            close_session_loop(esp, display)
             break
         elif event_name == "ready":
             log("ESP32", "Controller ready.")
@@ -602,20 +698,20 @@ def run_session(uid: str, backend: SupabaseBackend, esp: Esp32Uart | MockEsp32, 
 
     log(
         "SESSION",
-        f"Ending: {session.accepted_bottles} bottles, {session.total_points} points.",
+        f"Ending: {session.accepted_bottles} bottles, {session.total_points} new points, {session.display_points} displayed points.",
     )
     if session.accepted_bottles == 0:
         log("SESSION", "Nothing accepted; no Supabase transaction submitted.")
-        display.update(status="Waiting RFID", student="-", last_event="Session ended with no accepted bottles.")
+        reset_display_for_rfid(display, "Session ended with no accepted bottles.")
     elif config.OFFLINE_TEST_MODE:
         log("TEST", "Offline test mode: totals shown above, Supabase submission skipped.")
-        display.update(status="Waiting RFID", student="-", last_event="Offline session ended; Supabase skipped.")
+        reset_display_for_rfid(display, "Offline session ended; Supabase skipped.")
     elif backend.confirm_session(session):
         log("SESSION", "Transaction saved successfully.")
-        display.update(status="Saved", student="-", last_event="Session saved to Supabase.")
+        reset_display_for_rfid(display, "Session saved to Supabase.")
     else:
         log("SESSION", "Supabase submission failed; keep this terminal output for recovery.")
-        display.update(status="Save Failed", last_event="Supabase submission failed.")
+        reset_display_for_rfid(display, "Supabase submission failed.")
 
 
 def main() -> int:
@@ -628,8 +724,8 @@ def main() -> int:
     vision: Vision | None = None
     display = create_display(
         getattr(config, "DISPLAY_ENABLED", False),
-        getattr(config, "DISPLAY_WIDTH", 800),
-        getattr(config, "DISPLAY_HEIGHT", 480),
+        getattr(config, "DISPLAY_WIDTH", 1024),
+        getattr(config, "DISPLAY_HEIGHT", 600),
         getattr(config, "DISPLAY_FPS", 20),
     )
     try:
@@ -647,7 +743,7 @@ def main() -> int:
         reader = CardReader()
         vision = Vision()
         while True:
-            display.update(status="Waiting RFID", rfid="-", student="-", last_event="Waiting for RFID card.")
+            reset_display_for_rfid(display)
             uid = reader.wait_for_uid()
             if uid:
                 run_session(uid, backend, esp, vision, display)

@@ -1,7 +1,7 @@
 """Copy this file to config.py on the Raspberry Pi and edit the values."""
 
 # Raspberry Pi UART connected to ESP32 Serial2.
-ESP32_ENABLED = False
+ESP32_ENABLED = True
 UART_PORT = "/dev/serial0"
 UART_BAUD = 115200
 UART_READ_TIMEOUT_SEC = 0.2
@@ -28,8 +28,8 @@ ANNOTATED_IMAGE_DIR = "detections"
 
 # Optional full-screen pygame dashboard.
 DISPLAY_ENABLED = False
-DISPLAY_WIDTH = 800
-DISPLAY_HEIGHT = 480
+DISPLAY_WIDTH = 1024
+DISPLAY_HEIGHT = 600
 DISPLAY_FPS = 20
 
 # "usb_event" reads the USB scanner directly even while pygame owns the screen.
